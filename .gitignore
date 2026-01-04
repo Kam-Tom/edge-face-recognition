@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.env
+venv/
+.envrc
+.ipynb_checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+
+# Data / large artifacts
+data/
+data/raw/
+data/processed/
+
+# Checkpoints / model weights
+checkpoints/
+weights/
+*.pth
+*.pt
+*.keras
+*.h5
+
+# OS
+.DS_Store
