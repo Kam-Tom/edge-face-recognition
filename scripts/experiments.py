@@ -34,6 +34,8 @@ TESTS = [
     ("model_dropout", "arcface", "sgd"),
     ("model_accordion", "arcface", "sgd"),
     ("model_inverse", "arcface", "sgd"),
+    ("model_resnet12", "arcface", "sgd"),
+    ("model_resnet12_mobile", "arcface", "sgd"),
     # AdamW variants
     ("model_baseline", "arcface", "adamw"),
     ("model_resnet", "arcface", "adamw"),
@@ -43,6 +45,7 @@ TESTS = [
     ("model_ghost_net", "arcface", "adamw"),
     ("model_shufflenet", "arcface", "adamw"),
     ("model_repVGG", "arcface", "adamw"),
+    ("model_resnet12", "arcface", "adamw"),
 ]
 
 

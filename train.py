@@ -7,7 +7,7 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from tqdm import tqdm
 import dataset
-from loss import ArcFace
+from loss import ArcFaceLoss, SoftmaxLoss
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
@@ -22,11 +22,7 @@ def validate(model, metric_fc, loader, criterion):
             images, labels = images.to(DEVICE), labels.to(DEVICE)
             embeddings = model(images)
 
-            # ArcFace requires labels for margin penalty
-            if isinstance(metric_fc, nn.Linear):
-                logits = metric_fc(embeddings)
-            else:
-                logits = metric_fc(embeddings, labels)
+            logits = metric_fc.get_logits(embeddings)
 
             val_loss += criterion(logits, labels).item()
             correct += (logits.argmax(1) == labels).sum().item()
@@ -56,10 +52,11 @@ def run_training(args):
         print(f"Error loading model: {e}")
         return
 
+    # Use loss
     if args.loss == "arcface":
-        metric_fc = ArcFace(512, num_classes).to(DEVICE)
+        metric_fc = ArcFaceLoss(512, num_classes).to(DEVICE)
     else:
-        metric_fc = nn.Linear(512, num_classes).to(DEVICE)
+        metric_fc = SoftmaxLoss(512, num_classes).to(DEVICE)
 
     criterion = nn.CrossEntropyLoss()
     params = [{"params": model.parameters()}, {"params": metric_fc.parameters()}]
@@ -69,7 +66,7 @@ def run_training(args):
     else:
         optimizer = optim.SGD(params, lr=lr, momentum=0.9, weight_decay=5e-4)
 
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.1, patience=2)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="max", factor=0.1, patience=3)
 
     best_acc = 0.0
     step = 0
@@ -85,10 +82,8 @@ def run_training(args):
             optimizer.zero_grad()
 
             embeddings = model(images)
-            if args.loss == "arcface":
-                logits = metric_fc(embeddings, labels)
-            else:
-                logits = metric_fc(embeddings)
+
+            logits = metric_fc(embeddings, labels)
 
             loss = criterion(logits, labels)
             loss.backward()
@@ -103,7 +98,7 @@ def run_training(args):
                 writer.add_scalar("Train/Loss", loss.item(), step)
 
         val_loss, val_acc = validate(model, metric_fc, val_loader, criterion)
-        scheduler.step(val_loss)
+        scheduler.step(val_acc)
 
         print(f"Val Loss: {val_loss:.4f} | Acc: {val_acc:.2f}% | Best: {best_acc:.2f}%")
         writer.add_scalar("Val/Accuracy", val_acc, epoch)
