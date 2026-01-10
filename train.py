@@ -100,7 +100,10 @@ def run_training(args):
         val_loss, val_acc = validate(model, metric_fc, val_loader, criterion)
         scheduler.step(val_acc)
 
-        print(f"Val Loss: {val_loss:.4f} | Acc: {val_acc:.2f}% | Best: {best_acc:.2f}%")
+        current_lr = optimizer.param_groups[0]['lr']
+        print(f"Val Loss: {val_loss:.4f} | Acc: {val_acc:.2f}% | Best: {best_acc:.2f}% | LR: {current_lr:.6f}")
+        
+        writer.add_scalar("Train/LR", current_lr, epoch)
         writer.add_scalar("Val/Accuracy", val_acc, epoch)
 
         checkpoint = {

@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ArcFaceLoss(nn.Module):
-    def __init__(self, in_features, out_features, s=32.0, m=0.30):
+    def __init__(self, in_features, out_features, s=64.0, m=0.35):
         super().__init__()
         self.s = s
         self.m = m

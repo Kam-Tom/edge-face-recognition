@@ -1,6 +1,7 @@
+import os
 import numpy as np
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, Dataset
 from sklearn.model_selection import train_test_split
 
 STATS = ([0.5, 0.5, 0.5], [0.5, 0.5, 0.5])
@@ -13,13 +14,38 @@ def get_transforms(is_train=True):
     t_list.extend([transforms.ToTensor(), transforms.Normalize(*STATS)])
     return transforms.Compose(t_list)
 
-def get_dataloaders(root_dir, batch_size=32, val_split=0.2, num_workers=2):
+
+class TransformSubset(Dataset):
+    """Subset with transform applied on-the-fly."""
+    def __init__(self, dataset, indices, transform):
+        self.dataset = dataset
+        self.indices = list(indices)  # Convert to list for pickling
+        self.transform = transform
+    
+    def __len__(self):
+        return len(self.indices)
+    
+    def __getitem__(self, idx):
+        img, label = self.dataset[self.indices[idx]]
+        if self.transform:
+            img = self.transform(img)
+        return img, label
+
+
+def get_dataloaders(root_dir, batch_size=32, val_split=0.2, num_workers=None):
     print(f"🔄 Loading data from: {root_dir}")
     
+    # Auto-detect optimal workers (cloud GPUs benefit from more workers)
+    if num_workers is None:
+        num_workers = min(8, os.cpu_count() or 4)
+    
+    # Load dataset ONCE without transforms
     full_dataset = datasets.ImageFolder(root_dir)
     targets = full_dataset.targets
 
     # Stratified split - keeps class proportions balanced
+    # NOTE: This splits IMAGES, not identities. Train/val will have same people.
+    # This is fine for monitoring training, but final eval should use separate identities.
     try:
         train_idx, val_idx = train_test_split(
             np.arange(len(targets)), 
@@ -31,14 +57,22 @@ def get_dataloaders(root_dir, batch_size=32, val_split=0.2, num_workers=2):
         print("⚠️ Some class has only 1 image - remove folders with <2 images.")
         return None, None, 0
 
-    train_subset = Subset(datasets.ImageFolder(root_dir, transform=get_transforms(True)), train_idx)
-    val_subset = Subset(datasets.ImageFolder(root_dir, transform=get_transforms(False)), val_idx)
+    # Apply different transforms to train/val subsets
+    train_subset = TransformSubset(full_dataset, train_idx, get_transforms(True))
+    val_subset = TransformSubset(full_dataset, val_idx, get_transforms(False))
 
-    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, 
-                              num_workers=num_workers, pin_memory=True)
-    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, 
-                            num_workers=num_workers, pin_memory=True)
+    # Optimize DataLoader for faster loading
+    loader_kwargs = dict(
+        num_workers=num_workers,
+        pin_memory=True,
+        persistent_workers=num_workers > 0,
+        prefetch_factor=4 if num_workers > 0 else None,
+    )
+
+    train_loader = DataLoader(train_subset, batch_size=batch_size, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_subset, batch_size=batch_size, shuffle=False, **loader_kwargs)
     
-    print(f"✅ Split: {len(train_idx)} train, {len(val_idx)} val | Classes: {len(full_dataset.classes)}")
+    print(f"✅ Split: {len(train_idx)} train, {len(val_idx)} val | Classes: {len(full_dataset.classes)} | Workers: {num_workers}")
+    print(f"⚠️  Note: Train/val share identities. Use separate test set with different people for final eval.")
     
     return train_loader, val_loader, len(full_dataset.classes)
