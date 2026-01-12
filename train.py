@@ -71,6 +71,11 @@ def run_training(args):
     best_acc = 0.0
     step = 0
 
+    # Zmienne do przechowywania ostatnich wartości do pliku summary
+    final_train_loss = 0.0
+    final_val_loss = 0.0
+    final_val_acc = 0.0
+
     for epoch in range(args.epochs):
         model.train()
         metric_fc.train()
@@ -97,14 +102,25 @@ def run_training(args):
             if step % 10 == 0:
                 writer.add_scalar("Train/Loss", loss.item(), step)
 
+        # --- KONIEC EPOKI ---
+        final_train_loss = epoch_loss / count if count > 0 else 0.0 # Obliczamy średni loss z epoki
+        
         val_loss, val_acc = validate(model, metric_fc, val_loader, criterion)
+        
+        # Zapisujemy wartości do zmiennych finalnych
+        final_val_loss = val_loss
+        final_val_acc = val_acc
+
         scheduler.step(val_acc)
 
         current_lr = optimizer.param_groups[0]['lr']
-        print(f"Val Loss: {val_loss:.4f} | Acc: {val_acc:.2f}% | Best: {best_acc:.2f}% | LR: {current_lr:.6f}")
+        # Dodano Train Loss do printa
+        print(f"Train Loss: {final_train_loss:.4f} | Val Loss: {val_loss:.4f} | Acc: {val_acc:.2f}% | Best: {best_acc:.2f}% | LR: {current_lr:.6f}")
         
         writer.add_scalar("Train/LR", current_lr, epoch)
         writer.add_scalar("Val/Accuracy", val_acc, epoch)
+        writer.add_scalar("Val/Loss", val_loss, epoch)          # Dodano: Zapis Val Loss do TB
+        writer.add_scalar("Train/AvgLoss", final_train_loss, epoch) # Dodano: Zapis Train Loss do TB
 
         checkpoint = {
             "epoch": epoch,
@@ -122,7 +138,13 @@ def run_training(args):
             print("New best model saved")
 
     writer.close()
-    print("Training finished")
+    
+    # Dodano: Zapis wyników do pliku tekstowego na koniec
+    with open("training_summary.txt", "a") as f:
+        # Format: Model, Loss, Optimizer, TrainLoss, ValLoss, LastAcc, BestAcc
+        f.write(f"{args.model},{args.loss},{args.optimizer},{final_train_loss:.4f},{final_val_loss:.4f},{final_val_acc:.2f},{best_acc:.2f}\n")
+    
+    print("Training finished. Results saved to training_summary.txt")
 
 
 if __name__ == "__main__":

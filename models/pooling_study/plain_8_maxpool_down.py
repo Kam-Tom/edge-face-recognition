@@ -1,27 +1,40 @@
 import torch
 import torch.nn as nn
 
-INFO = "Baseline CNN + GAP: 3 stages [64->128->256]. GlobalAvgPool -> Small FC (256 inputs)"
+INFO = "Plain CNN 8 layers with MaxPool for downsampling. Compare to depth_study/plain_8 (stride)."
 
 class Block(nn.Module):
     def __init__(self, in_c, out_c):
         super().__init__()
-        self.conv = nn.Conv2d(in_c, out_c, 3, padding=1, bias=False)
+        self.conv = nn.Conv2d(in_c, out_c, 3, 1, 1, bias=False)
         self.bn = nn.BatchNorm2d(out_c)
         self.act = nn.PReLU(out_c)
-        self.pool = nn.MaxPool2d(2)
 
     def forward(self, x):
-        return self.pool(self.act(self.bn(self.conv(x))))
+        return self.act(self.bn(self.conv(x)))
 
 class Net(nn.Module):
     def __init__(self, embedding_size=512):
         super().__init__()
+        
         self.features = nn.Sequential(
+            # Stage 1: 64 channels -> 56x56
             Block(3, 64),
+            Block(64, 64),
+            nn.MaxPool2d(2),            # Downsample AFTER convs
+            
+            # Stage 2: 128 channels -> 28x28
             Block(64, 128),
+            Block(128, 128),
+            nn.MaxPool2d(2),
+            
+            # Stage 3: 256 channels -> 14x14
             Block(128, 256),
+            Block(256, 256),
+            Block(256, 256),
+            Block(256, 256),
         )
+        
         self.gap = nn.AdaptiveAvgPool2d(1)
         self.fc = nn.Linear(256, embedding_size)
         self.bn = nn.BatchNorm1d(embedding_size)

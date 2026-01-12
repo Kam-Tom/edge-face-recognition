@@ -35,17 +35,16 @@ class TransformSubset(Dataset):
 def get_dataloaders(root_dir, batch_size=32, val_split=0.2, num_workers=None):
     print(f"🔄 Loading data from: {root_dir}")
     
-    # Auto-detect optimal workers (cloud GPUs benefit from more workers)
     if num_workers is None:
-        num_workers = min(8, os.cpu_count() or 4)
+        available_cpu = os.cpu_count() or 4
+        # Use 75% of CPUs, max 24, min 4
+        num_workers = min(max(available_cpu * 3 // 4, 4), 24)
     
     # Load dataset ONCE without transforms
     full_dataset = datasets.ImageFolder(root_dir)
     targets = full_dataset.targets
 
     # Stratified split - keeps class proportions balanced
-    # NOTE: This splits IMAGES, not identities. Train/val will have same people.
-    # This is fine for monitoring training, but final eval should use separate identities.
     try:
         train_idx, val_idx = train_test_split(
             np.arange(len(targets)), 

@@ -1,0 +1,7 @@
+simple.model_baseline_flat,arcface,sgd,2.8063,1.3436,85.53,85.57
+simple.model_baseline,arcface,sgd,13.9569,3.3821,60.47,63.44
+simple.model_dropout_flat,arcface,sgd,8.7134,1.4105,85.06,85.13
+simple.model_dropout,arcface,sgd,5.4801,9.2660,0.00,0.33
+advanced.model_bottleneck_noskip,arcface,sgd,5.5204,9.2660,0.00,0.64
+advanced.model_bottleneck,arcface,sgd,8.0241,1.7310,82.03,82.03
+advanced.model_ghost,arcface,sgd,5.5120,1.6558,85.26,85.73
