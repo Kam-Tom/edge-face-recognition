@@ -6,7 +6,7 @@ from datetime import datetime
 # --- CONFIGURATION ---
 DATA_DIR = "data/processed/casia"
 VAL_DIR = "data/processed/lfw_112"
-EPOCHS = 15  # Reduced for faster iteration
+EPOCHS = 25
 BATCH_SIZE = 512
 RESULTS_FILE = "results_ablation.txt"
 
@@ -54,9 +54,9 @@ TESTS = [
     ("block_study.depthwise_resnet_14",  "arcface", "sgd"),
     
     # ==================== PRODUCTION ====================
-    ("production.seres20",               "arcface", "sgd"),
-    ("production.mobilenet20",           "arcface", "sgd"),
-    ("production.ghostnet20",            "arcface", "sgd"),
+    ("production.se_resnet_20",                               "arcface", "sgd"),
+    ("production.inverted_bottleneck_depthwise_20",           "arcface", "sgd"),
+    ("production.ghost_depthwise_20",                         "arcface", "sgd"),
     
     # ==================== OPTIMIZER TEST ====================
     ("depth_study.plain_8",              "arcface", "adamw"),

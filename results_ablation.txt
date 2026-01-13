@@ -1,9 +1,0 @@
-MODEL                                    LOSS       OPT        AUC        ACC       
---------------------------------------------------------------------------------
-simple.model_baseline_flat               arcface    sgd        0.7861     72.30     
-simple.model_baseline                    arcface    sgd        0.9056     84.55     
-simple.model_dropout_flat                arcface    sgd        0.8129     74.18     
-simple.model_dropout                     arcface    sgd        0.6099     60.15     
-advanced.model_bottleneck_noskip         arcface    sgd        0.6863     63.83     
-advanced.model_bottleneck                arcface    sgd        0.8629     78.85     
-advanced.model_ghost                     arcface    sgd        0.8415     79.42     
