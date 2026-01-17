@@ -1,30 +1,72 @@
+import numpy as np
+import warnings
+
+# --- KRYTYCZNA POPRAWKA DLA MXNET I NUMPY 1.24+ ---
+# Musi być wykonana ZANIM zaimportujemy mxnet
+try:
+    np.bool = np.bool_
+    np.int = int
+    np.float = float
+    np.complex = complex
+    np.object = object
+    np.str = str
+except AttributeError:
+    pass
+# -----------------------------------------------------
+
 import os
 import cv2
 import shutil
-import numpy as np
 import torch
 from pathlib import Path
 from tqdm import tqdm
-from concurrent.futures import ThreadPoolExecutor
-
-# Numpy compatibility fix
-np.bool = np.bool_ if hasattr(np, 'bool_') else bool
+from torch.utils.data import DataLoader, Dataset
+from facenet_pytorch import MTCNN
 
 import mxnet as mx
 from mxnet import recordio
-# ZMIANA: Używamy wersji PyTorch, żeby nie instalować TensorFlow
-from facenet_pytorch import MTCNN
+from concurrent.futures import ThreadPoolExecutor
 
 # --- CONFIGURATION ---
 RAW_REC_DIR = Path("../data/raw/casia-webface-rec")
 RAW_IMAGES_DIR = Path("../data/raw/casia-webface")
-# Output dla wersji BEZ ALIGNMENTU
-PROCESSED_DIR = Path("../data/processed/casia_no_align")
+PROCESSED_DIR = Path("../data/processed/casia_no_align") # Output dla Crop Only
 
 KAGGLE_DATASET = "debarghamitraroy/casia-webface"
-AVAILABLE_CPU = os.cpu_count() or 4
-NUM_WORKERS = min(max(AVAILABLE_CPU * 3 // 4, 4), 16)
 
+# Optimization Params
+BATCH_SIZE = 512       # A6000 pociągnie to bez problemu
+NUM_WORKERS = 8        # Szybkie ładowanie
+AVAILABLE_CPU = os.cpu_count() or 4
+
+
+# --- DATASET FOR BATCH PROCESSING ---
+class FaceDataset(Dataset):
+    def __init__(self, image_paths):
+        self.image_paths = image_paths
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        path = self.image_paths[idx]
+        img = cv2.imread(str(path))
+        if img is None:
+            # Zwracamy pusty obrazek w razie błędu
+            return np.zeros((10, 10, 3), dtype=np.uint8), str(path), False
+        
+        # MTCNN wymaga RGB
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        return img_rgb, str(path), True
+
+def collate_fn(batch):
+    batch = [b for b in batch if b[2]]
+    if not batch: return [], [], []
+    images, paths, _ = zip(*batch)
+    return list(images), list(paths)
+
+
+# --- HELPERS (Download & Extract) ---
 
 def download_dataset():
     if RAW_REC_DIR.exists() and any(RAW_REC_DIR.rglob("*.rec")):
@@ -43,22 +85,11 @@ def download_dataset():
         print(f"❌ Download failed: {e}")
         exit(1)
 
-
-def find_rec_file(start_dir):
-    rec_files = list(start_dir.rglob("*.rec"))
-    for f in rec_files:
-        if "train" in f.name: return f
-    return rec_files[0] if rec_files else None
-
-
-# --- PHASE 1: EXTRACTION ---
-
 def save_raw_image(args):
     label, img_bytes, idx, output_dir = args
     try:
         img = mx.image.imdecode(img_bytes).asnumpy()
         img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        
         person_dir = output_dir / str(label)
         person_dir.mkdir(exist_ok=True)
         cv2.imwrite(str(person_dir / f"{idx}.jpg"), img)
@@ -101,11 +132,17 @@ def extract_raw_images(rec_path):
         list(tqdm(executor.map(save_raw_image, tasks), total=len(tasks)))
     print("✅ Extraction completed.")
 
+def find_rec_file(start_dir):
+    rec_files = list(start_dir.rglob("*.rec"))
+    for f in rec_files:
+        if "train" in f.name: return f
+    return rec_files[0] if rec_files else None
 
-# --- PHASE 2: CROP ONLY (NO ALIGNMENT) ---
 
-def process_crop_only():
-    print(f"✂️ Phase 2: Running MTCNN CROP ONLY (No Rotation, PyTorch) -> {PROCESSED_DIR}...")
+# --- PHASE 2: CROP ONLY (BATCHED) ---
+
+def process_crop_only_batched():
+    print(f"✂️  Phase 2: Running FAST MTCNN CROP ONLY (Batch Size: {BATCH_SIZE})...")
     
     if not RAW_IMAGES_DIR.exists():
         print("❌ Raw images directory not found. Run extraction first.")
@@ -113,70 +150,82 @@ def process_crop_only():
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     
-    # Auto-detect GPU
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"   -> Using device: {device}")
     
     # Init facenet-pytorch MTCNN
-    # landmarks=False bo ich NIE POTRZEBUJEMY do samego cropa
+    # landmarks=False bo robimy tylko crop ramki
     detector = MTCNN(keep_all=False, select_largest=False, device=device, post_process=False)
     
+    print("🔍 Scanning files...")
     image_paths = list(RAW_IMAGES_DIR.rglob("*.jpg"))
-    print(f"🔍 Found {len(image_paths)} images to process.")
+    print(f"   -> Found {len(image_paths)} images to process.")
     
+    # Loader
+    dataset = FaceDataset(image_paths)
+    loader = DataLoader(
+        dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=False, 
+        num_workers=NUM_WORKERS, 
+        collate_fn=collate_fn
+    )
+
     success_count = 0
     
-    for img_path in tqdm(image_paths, desc="Cropping"):
+    for images, paths in tqdm(loader, desc="Cropping (Batched)"):
+        if not images: continue
+        
         try:
-            person_id = img_path.parent.name
-            save_dir = PROCESSED_DIR / person_id
+            # 1. Detect faces (boxes only)
+            # boxes_list: [[box1], [box2], ...]
+            # probs_list: [[prob1], ...]
+            boxes_list, probs_list = detector.detect(images, landmarks=False)
+        except Exception as e:
+            print(f"⚠️ Batch error: {e}")
+            continue
+            
+        # 2. Process results (CPU)
+        for i, path_str in enumerate(paths):
+            img_path = Path(path_str)
+            save_dir = PROCESSED_DIR / img_path.parent.name
             save_path = save_dir / img_path.name
             
-            if save_path.exists():
-                continue
+            if save_path.exists(): continue
                 
-            img = cv2.imread(str(img_path))
-            if img is None: continue
-
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            
-            # Detect faces (boxes only)
-            boxes, probs = detector.detect(img_rgb, landmarks=False)
+            img_rgb = images[i]
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
             
             final_img = None
             
-            if boxes is not None:
-                # 1. Take best face (MTCNN sorts by probability usually, taking first)
-                box = boxes[0]
+            if boxes_list[i] is not None:
+                # 1. Take best face
+                box = boxes_list[i][0] # Pierwszy box (najlepszy)
                 
                 # 2. Get coordinates
                 x1, y1, x2, y2 = [int(b) for b in box]
                 
-                # 3. Clamp coordinates (zabezpieczenie przed wyjściem poza obraz)
-                h_img, w_img = img.shape[:2]
+                # 3. Clamp
+                h_img, w_img = img_bgr.shape[:2]
                 x1 = max(0, x1)
                 y1 = max(0, y1)
                 x2 = min(w_img, x2)
                 y2 = min(h_img, y2)
                 
-                # 4. Crop (WYCINANIE)
+                # 4. Crop
                 if x2 > x1 and y2 > y1:
-                    crop_img = img[y1:y2, x1:x2]
-                    # 5. Resize (SKALOWANIE) - to zniekształci proporcje, ale tak ma być w tym teście
+                    crop_img = img_bgr[y1:y2, x1:x2]
                     final_img = cv2.resize(crop_img, (112, 112))
             
-            # Fallback: Jeśli nie wykryto twarzy, skalujemy całe zdjęcie
+            # Fallback
             if final_img is None:
-                final_img = cv2.resize(img, (112, 112))
+                final_img = cv2.resize(img_bgr, (112, 112))
 
             save_dir.mkdir(exist_ok=True)
             cv2.imwrite(str(save_path), final_img)
             success_count += 1
-            
-        except Exception:
-            continue
 
-    print(f"✅ Cropping completed. processed: {success_count}/{len(image_paths)}")
+    print(f"✅ Cropping completed. Processed: {success_count}/{len(image_paths)}")
     print(f"💾 Data ready at: {PROCESSED_DIR}")
 
 
@@ -189,7 +238,7 @@ def main():
         return
 
     extract_raw_images(rec_file)
-    process_crop_only()
+    process_crop_only_batched()
 
 if __name__ == "__main__":
     main()
