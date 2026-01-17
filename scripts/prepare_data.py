@@ -2,6 +2,7 @@ import os
 import cv2
 import shutil
 import numpy as np
+import torch
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
@@ -11,7 +12,7 @@ np.bool = np.bool_ if hasattr(np, 'bool_') else bool
 
 import mxnet as mx
 from mxnet import recordio
-from mtcnn import MTCNN
+from facenet_pytorch import MTCNN  # Replaces the TensorFlow-based library
 
 # --- CONFIGURATION ---
 RAW_REC_DIR = Path("../data/raw/casia-webface-rec")
@@ -108,7 +109,7 @@ def extract_raw_images(rec_path):
 # --- PHASE 2: ALIGNMENT ---
 
 def process_alignment():
-    print(f"📐 Phase 2: Running MTCNN alignment and cropping to {PROCESSED_DIR}...")
+    print(f"📐 Phase 2: Running MTCNN (facenet-pytorch) alignment -> {PROCESSED_DIR}...")
     
     if not RAW_IMAGES_DIR.exists():
         print("❌ Raw images directory not found. Run extraction first.")
@@ -116,7 +117,12 @@ def process_alignment():
 
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
     
-    detector = MTCNN()
+    # Auto-detect GPU
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"   -> Using device: {device}")
+
+    # Init facenet-pytorch MTCNN
+    detector = MTCNN(keep_all=False, select_largest=False, device=device)
     
     image_paths = list(RAW_IMAGES_DIR.rglob("*.jpg"))
     print(f"🔍 Found {len(image_paths)} images to process.")
@@ -136,26 +142,21 @@ def process_alignment():
             if img is None: continue
 
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            results = detector.detect_faces(img_rgb)
+            
+            # Detect faces (returns boxes, probs, landmarks)
+            boxes, probs, points = detector.detect(img_rgb, landmarks=True)
             
             final_img = None
             
-            if results:
-                best_face = max(results, key=lambda x: x['confidence'])
-                keypoints = best_face['keypoints']
-                
-                dst_pts = np.array([
-                    keypoints['left_eye'],
-                    keypoints['right_eye'],
-                    keypoints['nose'],
-                    keypoints['mouth_left'],
-                    keypoints['mouth_right']
-                ], dtype=np.float32)
+            if boxes is not None:
+                # points[0] contains 5 landmarks for the best face
+                dst_pts = points[0].astype(np.float32)
                 
                 tform = cv2.estimateAffinePartial2D(dst_pts, REFERENCE_PTS, method=cv2.LMEDS)[0]
                 if tform is not None:
                     final_img = cv2.warpAffine(img, tform, (112, 112))
             
+            # Fallback
             if final_img is None:
                 final_img = cv2.resize(img, (112, 112))
 

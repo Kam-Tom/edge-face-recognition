@@ -3,20 +3,21 @@ import cv2
 import shutil
 import numpy as np
 import tarfile
+import torch
 from pathlib import Path
 from tqdm import tqdm
-from mtcnn import MTCNN
+from facenet_pytorch import MTCNN  # Using PyTorch-based MTCNN
 
 # --- CONFIGURATION ---
 KAGGLE_DATASET = "atulanandjha/lfwpeople"
 
-# 1. Download location (temp zip/tar files)
+# 1. Download location
 DOWNLOAD_DIR = Path("../data/raw/lfw-download")
 
-# 2. Raw images location (Clean structure for Data Analysis)
+# 2. Raw images location
 RAW_IMAGES_DIR = Path("../data/raw/lfw")
 
-# 3. Final processed location (Aligned 112x112 for Validation)
+# 3. Final processed location
 PROCESSED_DIR = Path("../data/processed/lfw")
 
 AVAILABLE_CPU = os.cpu_count() or 4
@@ -47,7 +48,6 @@ def download_dataset():
 
 
 def extract_raw_images():
-    """Extracts images from downloaded archives to a clean RAW folder."""
     if RAW_IMAGES_DIR.exists() and any(RAW_IMAGES_DIR.iterdir()):
         print(f"✅ Raw images found in {RAW_IMAGES_DIR}. Skipping extraction.")
         return
@@ -55,29 +55,25 @@ def extract_raw_images():
     print(f"📦 Extracting archives to {RAW_IMAGES_DIR}...")
     RAW_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Extract .tgz files if present
     for tar_path in DOWNLOAD_DIR.glob("*.tgz"):
         print(f"   - Extracting {tar_path.name}...")
         with tarfile.open(tar_path) as tar:
             tar.extractall(path=DOWNLOAD_DIR)
 
-    # 2. Locate the actual image folder (LFW structure can be messy)
     source_root = None
     for path in DOWNLOAD_DIR.rglob("lfw-funneled"):
         if path.is_dir():
             source_root = path
             break
     
-    # Fallback
     if not source_root:
         possible = list(DOWNLOAD_DIR.rglob("George_W_Bush"))
         if possible: source_root = possible[0].parent
 
     if not source_root:
-        print("❌ Could not find image root directory inside download folder.")
+        print("❌ Could not find image root directory.")
         return
 
-    # 3. Copy clean structure to RAW_IMAGES_DIR
     print(f"📂 Organizing raw images into {RAW_IMAGES_DIR}...")
     shutil.copytree(source_root, RAW_IMAGES_DIR, dirs_exist_ok=True)
     
@@ -85,7 +81,7 @@ def extract_raw_images():
 
 
 def process_alignment():
-    print(f"📐 Running Alignment (MTCNN) -> {PROCESSED_DIR}...")
+    print(f"📐 Running Alignment (facenet-pytorch) -> {PROCESSED_DIR}...")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     # Copy pairs.txt
@@ -96,7 +92,12 @@ def process_alignment():
     else:
         print("⚠️ pairs.txt not found! Validation will fail.")
 
-    detector = MTCNN()
+    # Init MTCNN
+    device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    print(f"   -> Using device: {device}")
+    
+    detector = MTCNN(keep_all=False, select_largest=False, device=device)
+    
     image_paths = list(RAW_IMAGES_DIR.rglob("*.jpg"))
     print(f"🔍 Found {len(image_paths)} images to align.")
 
@@ -115,27 +116,21 @@ def process_alignment():
             if img is None: continue
 
             img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            results = detector.detect_faces(img_rgb)
+            
+            # Detect
+            boxes, probs, points = detector.detect(img_rgb, landmarks=True)
             
             final_img = None
 
-            if results:
-                best_face = max(results, key=lambda x: x['confidence'])
-                keypoints = best_face['keypoints']
+            if boxes is not None:
+                # points[0] are landmarks for the best face
+                dst_pts = points[0].astype(np.float32)
                 
-                dst_pts = np.array([
-                    keypoints['left_eye'],
-                    keypoints['right_eye'],
-                    keypoints['nose'],
-                    keypoints['mouth_left'],
-                    keypoints['mouth_right']
-                ], dtype=np.float32)
-
                 tform = cv2.estimateAffinePartial2D(dst_pts, REFERENCE_PTS, method=cv2.LMEDS)[0]
                 if tform is not None:
                     final_img = cv2.warpAffine(img, tform, (112, 112))
             
-            # Fallback for LFW
+            # Fallback
             if final_img is None:
                 final_img = cv2.resize(img, (112, 112))
 
