@@ -6,13 +6,14 @@ import torch
 from pathlib import Path
 from tqdm import tqdm
 from concurrent.futures import ThreadPoolExecutor
+from torch.utils.data import DataLoader, Dataset
 
 # Numpy compatibility fix
 np.bool = np.bool_ if hasattr(np, 'bool_') else bool
 
 import mxnet as mx
 from mxnet import recordio
-from facenet_pytorch import MTCNN  # Replaces the TensorFlow-based library
+from facenet_pytorch import MTCNN  # PyTorch-based MTCNN
 
 # --- CONFIGURATION ---
 RAW_REC_DIR = Path("../data/raw/casia-webface-rec")
@@ -21,7 +22,9 @@ PROCESSED_DIR = Path("../data/processed/casia")
 
 KAGGLE_DATASET = "debarghamitraroy/casia-webface"
 AVAILABLE_CPU = os.cpu_count() or 4
+# Using more workers for data loading to keep GPU busy
 NUM_WORKERS = min(max(AVAILABLE_CPU * 3 // 4, 4), 16)
+BATCH_SIZE = 512  # Optimized for A6000 / RTX 3090
 
 # Standard reference points for ArcFace (112x112)
 REFERENCE_PTS = np.array([
@@ -29,6 +32,35 @@ REFERENCE_PTS = np.array([
     [41.5493, 92.3655], [70.7255, 92.3655]
 ], dtype=np.float32)
 
+
+# --- DATASET FOR BATCH PROCESSING ---
+class FaceDataset(Dataset):
+    def __init__(self, image_paths):
+        self.image_paths = image_paths
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        path = self.image_paths[idx]
+        img = cv2.imread(str(path))
+        if img is None:
+            # Return dummy if read fails (filtered out later)
+            return np.zeros((10, 10, 3), dtype=np.uint8), str(path), False
+        
+        # MTCNN requires RGB
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        return img_rgb, str(path), True
+
+def collate_fn(batch):
+    # Filter out failed reads
+    batch = [b for b in batch if b[2]]
+    if not batch: return [], [], []
+    images, paths, _ = zip(*batch)
+    return list(images), list(paths)
+
+
+# --- DOWNLOAD & EXTRACT HELPERS ---
 
 def download_dataset():
     if RAW_REC_DIR.exists() and any(RAW_REC_DIR.rglob("*.rec")):
@@ -106,10 +138,10 @@ def extract_raw_images(rec_path):
     print("✅ Extraction completed.")
 
 
-# --- PHASE 2: ALIGNMENT ---
+# --- PHASE 2: ALIGNMENT (BATCHED) ---
 
 def process_alignment():
-    print(f"📐 Phase 2: Running MTCNN (facenet-pytorch) alignment -> {PROCESSED_DIR}...")
+    print(f"🚀 Phase 2: Running FAST MTCNN Alignment (Batch Size: {BATCH_SIZE}) -> {PROCESSED_DIR}...")
     
     if not RAW_IMAGES_DIR.exists():
         print("❌ Raw images directory not found. Run extraction first.")
@@ -122,52 +154,71 @@ def process_alignment():
     print(f"   -> Using device: {device}")
 
     # Init facenet-pytorch MTCNN
-    detector = MTCNN(keep_all=False, select_largest=False, device=device)
+    # keep_all=False -> keep only best face
+    # post_process=False -> slightly faster
+    detector = MTCNN(keep_all=False, select_largest=False, device=device, post_process=False)
     
+    print("🔍 Scanning image files...")
     image_paths = list(RAW_IMAGES_DIR.rglob("*.jpg"))
-    print(f"🔍 Found {len(image_paths)} images to process.")
+    print(f"   -> Found {len(image_paths)} images.")
     
+    # Setup Data Loader for speed
+    dataset = FaceDataset(image_paths)
+    loader = DataLoader(
+        dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=False, 
+        num_workers=NUM_WORKERS, 
+        collate_fn=collate_fn
+    )
+
     success_count = 0
     
-    for img_path in tqdm(image_paths, desc="Aligning"):
+    for images, paths in tqdm(loader, desc="Aligning (Batched)"):
+        if not images: continue
+        
         try:
-            person_id = img_path.parent.name
-            save_dir = PROCESSED_DIR / person_id
+            # 1. Detect faces in batch (GPU)
+            # boxes_list: [[box1], [box2], ...] for each image in batch
+            # points_list: [[landmarks1], ...] for each image in batch
+            boxes_list, probs_list, points_list = detector.detect(images, landmarks=True)
+        except Exception as e:
+            print(f"⚠️ Batch error: {e}")
+            continue
+            
+        # 2. Process results (CPU)
+        for i, path_str in enumerate(paths):
+            img_path = Path(path_str)
+            save_dir = PROCESSED_DIR / img_path.parent.name
             save_path = save_dir / img_path.name
             
             if save_path.exists():
                 continue
                 
-            img = cv2.imread(str(img_path))
-            if img is None: continue
-
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-            
-            # Detect faces (returns boxes, probs, landmarks)
-            boxes, probs, points = detector.detect(img_rgb, landmarks=True)
+            # Get original image (RGB -> BGR for OpenCV save)
+            img_rgb = images[i]
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
             
             final_img = None
             
-            if boxes is not None:
-                # points[0] contains 5 landmarks for the best face
-                dst_pts = points[0].astype(np.float32)
+            # Check if face detected
+            if boxes_list[i] is not None:
+                # points_list[i][0] contains landmarks for the best face
+                dst_pts = points_list[i][0].astype(np.float32)
                 
                 tform = cv2.estimateAffinePartial2D(dst_pts, REFERENCE_PTS, method=cv2.LMEDS)[0]
                 if tform is not None:
-                    final_img = cv2.warpAffine(img, tform, (112, 112))
+                    final_img = cv2.warpAffine(img_bgr, tform, (112, 112))
             
             # Fallback
             if final_img is None:
-                final_img = cv2.resize(img, (112, 112))
+                final_img = cv2.resize(img_bgr, (112, 112))
 
             save_dir.mkdir(exist_ok=True)
             cv2.imwrite(str(save_path), final_img)
             success_count += 1
-            
-        except Exception:
-            continue
 
-    print(f"✅ Alignment completed. processed: {success_count}/{len(image_paths)}")
+    print(f"✅ Alignment completed. Processed: {success_count}/{len(image_paths)}")
     print(f"💾 Data ready at: {PROCESSED_DIR}")
 
 

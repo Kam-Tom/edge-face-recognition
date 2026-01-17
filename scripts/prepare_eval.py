@@ -6,20 +6,18 @@ import tarfile
 import torch
 from pathlib import Path
 from tqdm import tqdm
-from facenet_pytorch import MTCNN  # Using PyTorch-based MTCNN
+from torch.utils.data import DataLoader, Dataset
+from facenet_pytorch import MTCNN
 
 # --- CONFIGURATION ---
 KAGGLE_DATASET = "atulanandjha/lfwpeople"
-
-# 1. Download location
 DOWNLOAD_DIR = Path("../data/raw/lfw-download")
-
-# 2. Raw images location
 RAW_IMAGES_DIR = Path("../data/raw/lfw")
-
-# 3. Final processed location
 PROCESSED_DIR = Path("../data/processed/lfw")
 
+# Optimization Params
+BATCH_SIZE = 512       # Optimized for A6000
+NUM_WORKERS = 8        # Fast disk loading
 AVAILABLE_CPU = os.cpu_count() or 4
 
 # ArcFace Reference Points
@@ -28,6 +26,35 @@ REFERENCE_PTS = np.array([
     [41.5493, 92.3655], [70.7255, 92.3655]
 ], dtype=np.float32)
 
+
+# --- DATASET FOR BATCH PROCESSING ---
+class FaceDataset(Dataset):
+    def __init__(self, image_paths):
+        self.image_paths = image_paths
+
+    def __len__(self):
+        return len(self.image_paths)
+
+    def __getitem__(self, idx):
+        path = self.image_paths[idx]
+        img = cv2.imread(str(path))
+        if img is None:
+            # Return dummy if read fails
+            return np.zeros((10, 10, 3), dtype=np.uint8), str(path), False
+        
+        # MTCNN requires RGB
+        img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+        return img_rgb, str(path), True
+
+def collate_fn(batch):
+    # Filter out failed reads
+    batch = [b for b in batch if b[2]]
+    if not batch: return [], [], []
+    images, paths, _ = zip(*batch)
+    return list(images), list(paths)
+
+
+# --- DOWNLOAD & EXTRACT HELPERS ---
 
 def download_dataset():
     if DOWNLOAD_DIR.exists() and any(DOWNLOAD_DIR.rglob("*.tgz")):
@@ -80,8 +107,10 @@ def extract_raw_images():
     print("✅ Raw extraction completed.")
 
 
+# --- PHASE 2: ALIGNMENT (BATCHED) ---
+
 def process_alignment():
-    print(f"📐 Running Alignment (facenet-pytorch) -> {PROCESSED_DIR}...")
+    print(f"📐 Phase 2: Running FAST Batched Alignment (LFW) -> {PROCESSED_DIR}...")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
     # Copy pairs.txt
@@ -94,54 +123,68 @@ def process_alignment():
 
     # Init MTCNN
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"   -> Using device: {device}")
+    print(f"   -> Using device: {device} | Batch Size: {BATCH_SIZE}")
     
-    detector = MTCNN(keep_all=False, select_largest=False, device=device)
+    detector = MTCNN(keep_all=False, select_largest=False, device=device, post_process=False)
     
     image_paths = list(RAW_IMAGES_DIR.rglob("*.jpg"))
     print(f"🔍 Found {len(image_paths)} images to align.")
 
-    success = 0
+    # Setup DataLoader
+    dataset = FaceDataset(image_paths)
+    loader = DataLoader(
+        dataset, 
+        batch_size=BATCH_SIZE, 
+        shuffle=False, 
+        num_workers=NUM_WORKERS, 
+        collate_fn=collate_fn
+    )
+
+    success_count = 0
     
-    for img_path in tqdm(image_paths, desc="Aligning LFW"):
+    for images, paths in tqdm(loader, desc="Aligning LFW"):
+        if not images: continue
+        
         try:
-            person_name = img_path.parent.name
-            save_dir = PROCESSED_DIR / person_name
+            # 1. Detect faces in batch
+            boxes_list, probs_list, points_list = detector.detect(images, landmarks=True)
+        except Exception as e:
+            print(f"⚠️ Batch error: {e}")
+            continue
+
+        # 2. Process results
+        for i, path_str in enumerate(paths):
+            img_path = Path(path_str)
+            save_dir = PROCESSED_DIR / img_path.parent.name
             save_path = save_dir / img_path.name
             
             if save_path.exists():
                 continue
-
-            img = cv2.imread(str(img_path))
-            if img is None: continue
-
-            img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
             
-            # Detect
-            boxes, probs, points = detector.detect(img_rgb, landmarks=True)
+            # Get original image
+            img_rgb = images[i]
+            img_bgr = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2BGR)
             
             final_img = None
 
-            if boxes is not None:
-                # points[0] are landmarks for the best face
-                dst_pts = points[0].astype(np.float32)
+            # Check detection
+            if boxes_list[i] is not None:
+                # Use landmarks for alignment
+                dst_pts = points_list[i][0].astype(np.float32)
                 
                 tform = cv2.estimateAffinePartial2D(dst_pts, REFERENCE_PTS, method=cv2.LMEDS)[0]
                 if tform is not None:
-                    final_img = cv2.warpAffine(img, tform, (112, 112))
+                    final_img = cv2.warpAffine(img_bgr, tform, (112, 112))
             
             # Fallback
             if final_img is None:
-                final_img = cv2.resize(img, (112, 112))
+                final_img = cv2.resize(img_bgr, (112, 112))
 
             save_dir.mkdir(exist_ok=True)
             cv2.imwrite(str(save_path), final_img)
-            success += 1
+            success_count += 1
 
-        except Exception:
-            continue
-
-    print(f"✅ Done. Processed: {success}/{len(image_paths)}")
+    print(f"✅ Done. Processed: {success_count}/{len(image_paths)}")
     print(f"💾 Ready for validation in: {PROCESSED_DIR}")
 
 
