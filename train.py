@@ -110,11 +110,11 @@ def run_training(args):
             loss = criterion(logits, labels)
 
             if torch.isnan(loss):
-                print(f"⚠️ NaN at step {global_step}, skipping")
+                print(f"NaN at step {global_step}, skipping")
                 global_step += 1
                 continue
 
-            # Track batch accuracy (no grad needed, logits already computed)
+            # Track batch accuracy
             with torch.no_grad():
                 batch_acc = (logits.argmax(1) == labels).float().mean().item()
             

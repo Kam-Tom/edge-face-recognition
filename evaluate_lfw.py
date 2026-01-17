@@ -5,7 +5,6 @@ import torch.nn.functional as F
 import numpy as np
 import os
 import matplotlib
-# Ważne na serwerze bez ekranu (RunPod):
 matplotlib.use('Agg') 
 import matplotlib.pyplot as plt
 from torchvision import transforms
@@ -32,7 +31,7 @@ def load_model(model_name, weights_path):
         model.eval()
         return model
     except Exception as e:
-        print(f"❌ Błąd ładowania modelu: {e}")
+        print(f"Error loading model: {e}")
         exit(1)
 
 def parse_pairs(pairs_path):
@@ -54,12 +53,7 @@ def get_image_path(root, name, img_num):
     return os.path.join(root, name, filename)
 
 def plot_results(fpr, tpr, roc_auc, best_thresh, pos_sims, neg_sims, save_path):
-    """
-    Rysuje wykresy w stylu, który wolisz:
-    - ROC z czerwoną kropką w punkcie optymalnym.
-    - Histogram z zielonym/czerwonym kolorem i podanymi średnimi (μ).
-    """
-    # Ponowne obliczenie indexu dla kropki na wykresie
+
     optimal_idx = np.argmax(tpr - fpr)
 
     plt.figure(figsize=(12, 5))
@@ -68,7 +62,7 @@ def plot_results(fpr, tpr, roc_auc, best_thresh, pos_sims, neg_sims, save_path):
     plt.subplot(1, 2, 1)
     plt.plot(fpr, tpr, 'b-', linewidth=2, label=f'ROC (AUC = {roc_auc:.4f})')
     plt.plot([0, 1], [0, 1], 'k--', linewidth=1)
-    # Czerwona kropka (Best Threshold)
+    # Red dot (Best Threshold)
     plt.scatter([fpr[optimal_idx]], [tpr[optimal_idx]], c='red', s=100, zorder=5, 
                 label=f'Best (thresh={best_thresh:.3f})')
     
@@ -97,12 +91,12 @@ def plot_results(fpr, tpr, roc_auc, best_thresh, pos_sims, neg_sims, save_path):
 def evaluate(model, data_dir, save_dir=None):
     pairs_path = os.path.join(data_dir, "pairs.txt")
     if not os.path.exists(pairs_path):
-        print(f"❌ Brak pliku pairs.txt w {data_dir}")
+        print(f"Missing pairs.txt file in {data_dir}")
         return
 
-    print(f"📄 Wczytywanie par z: {pairs_path}")
+    print(f"Loading pairs from: {pairs_path}")
     pairs = parse_pairs(pairs_path)
-    print(f"🔍 Do sprawdzenia: {len(pairs)} par")
+    print(f"Checking: {len(pairs)} pairs")
     
     transform = get_transforms()
     sims = []
@@ -134,7 +128,6 @@ def evaluate(model, data_dir, save_dir=None):
     if missing_count > 0:
         print(f"⚠️ Pominięto {missing_count} par (brak zdjęć).")
 
-    # --- ANALIZA DANYCH ---
     sims = np.array(sims)
     labels = np.array(labels)
     
@@ -158,7 +151,6 @@ def evaluate(model, data_dir, save_dir=None):
     tar_01 = get_tar_at_far(0.01)
     tar_001 = get_tar_at_far(0.001)
 
-    # Wypisywanie (ZMIENIONO 'AUC Score' NA 'AUC')
     print(f"\n{'='*40}")
     print(f"🏆 WYNIK KOŃCOWY (LFW Protocol)")
     print(f"{'='*40}")
@@ -177,7 +169,7 @@ def evaluate(model, data_dir, save_dir=None):
     if save_dir:
         os.makedirs(save_dir, exist_ok=True)
         
-        # 1. Text Metrics (ZMIENIONO 'AUC Score' NA 'AUC')
+        # 1. Text Metrics
         with open(os.path.join(save_dir, "metrics.txt"), "w") as f:
             f.write(f"Accuracy:       {acc*100:.2f}%\n")
             f.write(f"AUC:            {roc_auc:.4f}\n")
@@ -189,7 +181,7 @@ def evaluate(model, data_dir, save_dir=None):
             f.write(f"Neg Sim Mean:   {neg_sims.mean():.4f}\n")
             f.write(f"Neg Sim Std:    {neg_sims.std():.4f}\n")
 
-        # 2. Plots (Używa nowej-starej funkcji plot_results)
+        # 2. Plots
         plot_results(fpr, tpr, roc_auc, best_thresh, pos_sims, neg_sims, 
                      os.path.join(save_dir, "plots.png"))
         

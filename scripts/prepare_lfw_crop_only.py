@@ -10,22 +10,16 @@ from mtcnn import MTCNN
 # --- CONFIGURATION ---
 KAGGLE_DATASET = "atulanandjha/lfwpeople"
 
-# 1. Download location (temp zip/tar files)
+# 1. Download location
 DOWNLOAD_DIR = Path("../data/raw/lfw-download")
 
-# 2. Raw images location (Clean structure for Data Analysis)
+# 2. Raw images location
 RAW_IMAGES_DIR = Path("../data/raw/lfw")
 
-# 3. Final processed location (Aligned 112x112 for Validation)
-PROCESSED_DIR = Path("../data/processed/lfw")
+# 3. OUTPUT LOCATION (Distinct from the aligned version)
+PROCESSED_DIR = Path("../data/processed/lfw_crop_only")
 
 AVAILABLE_CPU = os.cpu_count() or 4
-
-# ArcFace Reference Points
-REFERENCE_PTS = np.array([
-    [38.2946, 51.6963], [73.5318, 51.6963], [56.0252, 71.7366],
-    [41.5493, 92.3655], [70.7255, 92.3655]
-], dtype=np.float32)
 
 
 def download_dataset():
@@ -55,40 +49,39 @@ def extract_raw_images():
     print(f"📦 Extracting archives to {RAW_IMAGES_DIR}...")
     RAW_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
 
-    # 1. Extract .tgz files if present
+    # 1. Extract .tgz files
     for tar_path in DOWNLOAD_DIR.glob("*.tgz"):
         print(f"   - Extracting {tar_path.name}...")
         with tarfile.open(tar_path) as tar:
             tar.extractall(path=DOWNLOAD_DIR)
 
-    # 2. Locate the actual image folder (LFW structure can be messy)
+    # 2. Locate image folder
     source_root = None
     for path in DOWNLOAD_DIR.rglob("lfw-funneled"):
         if path.is_dir():
             source_root = path
             break
     
-    # Fallback
     if not source_root:
         possible = list(DOWNLOAD_DIR.rglob("George_W_Bush"))
         if possible: source_root = possible[0].parent
 
     if not source_root:
-        print("❌ Could not find image root directory inside download folder.")
+        print("❌ Could not find image root directory.")
         return
 
-    # 3. Copy clean structure to RAW_IMAGES_DIR
+    # 3. Copy to RAW_IMAGES_DIR
     print(f"📂 Organizing raw images into {RAW_IMAGES_DIR}...")
     shutil.copytree(source_root, RAW_IMAGES_DIR, dirs_exist_ok=True)
     
     print("✅ Raw extraction completed.")
 
 
-def process_alignment():
-    print(f"📐 Running Alignment (MTCNN) -> {PROCESSED_DIR}...")
+def process_crop_only():
+    print(f"✂️  Running CROP ONLY (No Alignment) -> {PROCESSED_DIR}...")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
 
-    # Copy pairs.txt
+    # Copy pairs.txt (CRITICAL)
     pairs_src = list(DOWNLOAD_DIR.rglob("pairs.txt"))
     if pairs_src:
         shutil.copy(pairs_src[0], PROCESSED_DIR / "pairs.txt")
@@ -98,11 +91,11 @@ def process_alignment():
 
     detector = MTCNN()
     image_paths = list(RAW_IMAGES_DIR.rglob("*.jpg"))
-    print(f"🔍 Found {len(image_paths)} images to align.")
+    print(f"🔍 Found {len(image_paths)} images to process.")
 
     success = 0
     
-    for img_path in tqdm(image_paths, desc="Aligning LFW"):
+    for img_path in tqdm(image_paths, desc="Cropping LFW"):
         try:
             person_name = img_path.parent.name
             save_dir = PROCESSED_DIR / person_name
@@ -120,22 +113,25 @@ def process_alignment():
             final_img = None
 
             if results:
+                # 1. Best face
                 best_face = max(results, key=lambda x: x['confidence'])
-                keypoints = best_face['keypoints']
                 
-                dst_pts = np.array([
-                    keypoints['left_eye'],
-                    keypoints['right_eye'],
-                    keypoints['nose'],
-                    keypoints['mouth_left'],
-                    keypoints['mouth_right']
-                ], dtype=np.float32)
+                # 2. Bounding Box
+                x, y, w, h = best_face['box']
+                
+                # 3. Clamp coords
+                h_img, w_img = img.shape[:2]
+                x = max(0, x)
+                y = max(0, y)
+                w = min(w, w_img - x)
+                h = min(h, h_img - y)
 
-                tform = cv2.estimateAffinePartial2D(dst_pts, REFERENCE_PTS, method=cv2.LMEDS)[0]
-                if tform is not None:
-                    final_img = cv2.warpAffine(img, tform, (112, 112))
+                # 4. Crop & Resize
+                if w > 0 and h > 0:
+                    crop = img[y:y+h, x:x+w]
+                    final_img = cv2.resize(crop, (112, 112))
             
-            # Fallback for LFW
+            # Fallback
             if final_img is None:
                 final_img = cv2.resize(img, (112, 112))
 
@@ -153,7 +149,7 @@ def process_alignment():
 def main():
     download_dataset()
     extract_raw_images()
-    process_alignment()
+    process_crop_only()
 
 if __name__ == "__main__":
     main()

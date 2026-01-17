@@ -11,7 +11,6 @@ BATCH_SIZE = 512
 RESULTS_FILE = "results_ablation.txt"
 
 # --- TESTS LIST ---
-# Format: (model_path, loss, optimizer)
 TESTS = [
     # ==================== DEPTH STUDY ====================
     ("depth_study.plain_4",              "arcface", "sgd"),
@@ -81,12 +80,11 @@ def run_cmd(cmd, capture_output=False):
 
 
 def get_model_info(model_path):
-    """Try to get INFO string from model"""
     try:
         module = __import__(model_path, fromlist=['INFO'])
         return getattr(module, 'INFO', '')[:50]
     except:
-        return ''
+        return ""
 
 
 # --- MAIN EXECUTION ---

@@ -1,7 +1,0 @@
-AUC: 0.9122
-Accuracy: 83.14%
-Best threshold: 0.4121
-TAR @ 1% FAR: 41.48%
-TAR @ 0.1% FAR: 19.63%
-Positive sim: 0.5428 ± 0.1362
-Negative sim: 0.2793 ± 0.1350
