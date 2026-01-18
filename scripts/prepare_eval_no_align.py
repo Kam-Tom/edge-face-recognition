@@ -1,8 +1,7 @@
 import numpy as np
 import warnings
 
-# --- KRYTYCZNA POPRAWKA DLA MXNET I NUMPY 1.24+ ---
-# Musi być wykonana ZANIM zaimportujemy mxnet
+# --- FIX DLA KOMPATYBILNOŚCI ---
 try:
     np.bool = np.bool_
     np.int = int
@@ -12,31 +11,27 @@ try:
     np.str = str
 except AttributeError:
     pass
-# -----------------------------------------------------
+# -------------------------------
 
 import os
 import cv2
 import shutil
+import tarfile
 import torch
 from pathlib import Path
 from tqdm import tqdm
 from torch.utils.data import DataLoader, Dataset
-from facenet_pytorch import MTCNN
-
-import mxnet as mx
-from mxnet import recordio
-from concurrent.futures import ThreadPoolExecutor
+from facenet_pytorch import MTCNN  # Używamy wersji PyTorch!
 
 # --- CONFIGURATION ---
-RAW_REC_DIR = Path("../data/raw/casia-webface-rec")
-RAW_IMAGES_DIR = Path("../data/raw/casia-webface")
-PROCESSED_DIR = Path("../data/processed/casia_no_align") # Output dla Crop Only
+KAGGLE_DATASET = "atulanandjha/lfwpeople"
+DOWNLOAD_DIR = Path("../data/raw/lfw-download")
+RAW_IMAGES_DIR = Path("../data/raw/lfw")
+PROCESSED_DIR = Path("../data/processed/lfw_crop_only")
 
-KAGGLE_DATASET = "debarghamitraroy/casia-webface"
-
-# Optimization Params
-BATCH_SIZE = 512       # A6000 pociągnie to bez problemu
-NUM_WORKERS = 8        # Szybkie ładowanie
+# Optymalizacja
+BATCH_SIZE = 512       # Tak samo jak w CASIA
+NUM_WORKERS = 8        
 AVAILABLE_CPU = os.cpu_count() or 4
 
 
@@ -52,7 +47,6 @@ class FaceDataset(Dataset):
         path = self.image_paths[idx]
         img = cv2.imread(str(path))
         if img is None:
-            # Zwracamy pusty obrazek w razie błędu
             return np.zeros((10, 10, 3), dtype=np.uint8), str(path), False
         
         # MTCNN wymaga RGB
@@ -66,101 +60,81 @@ def collate_fn(batch):
     return list(images), list(paths)
 
 
-# --- HELPERS (Download & Extract) ---
+# --- DOWNLOAD & EXTRACT ---
 
 def download_dataset():
-    if RAW_REC_DIR.exists() and any(RAW_REC_DIR.rglob("*.rec")):
-        print("✅ .rec files found. Skipping download.")
+    if DOWNLOAD_DIR.exists() and any(DOWNLOAD_DIR.rglob("*.tgz")):
+        print("✅ Dataset archive found. Skipping download.")
         return
 
-    print(f"⬇️ Downloading dataset {KAGGLE_DATASET}...")
+    print(f"⬇️ Downloading {KAGGLE_DATASET}...")
     try:
         from kaggle.api.kaggle_api_extended import KaggleApi
         api = KaggleApi()
         api.authenticate()
-        RAW_REC_DIR.mkdir(parents=True, exist_ok=True)
-        api.dataset_download_files(KAGGLE_DATASET, path=RAW_REC_DIR, unzip=True)
+        DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
+        api.dataset_download_files(KAGGLE_DATASET, path=DOWNLOAD_DIR, unzip=True)
         print("✅ Download completed.")
     except Exception as e:
         print(f"❌ Download failed: {e}")
         exit(1)
 
-def save_raw_image(args):
-    label, img_bytes, idx, output_dir = args
-    try:
-        img = mx.image.imdecode(img_bytes).asnumpy()
-        img = cv2.cvtColor(img, cv2.COLOR_RGB2BGR)
-        person_dir = output_dir / str(label)
-        person_dir.mkdir(exist_ok=True)
-        cv2.imwrite(str(person_dir / f"{idx}.jpg"), img)
-        return True
-    except:
-        return False
-
-def extract_raw_images(rec_path):
+def extract_raw_images():
     if RAW_IMAGES_DIR.exists() and any(RAW_IMAGES_DIR.iterdir()):
-        print(f"✅ Directory {RAW_IMAGES_DIR} is not empty. Assuming extraction is done.")
+        print(f"✅ Raw images found in {RAW_IMAGES_DIR}. Skipping extraction.")
         return
 
-    print(f"📦 Phase 1: Extracting raw images to {RAW_IMAGES_DIR}...")
-    idx_path = rec_path.with_suffix('.idx')
-    
-    if not idx_path.exists():
-        print("❌ .idx file not found.")
-        return
-
-    record = recordio.MXIndexedRecordIO(str(idx_path), str(rec_path), 'r')
-    header, _ = recordio.unpack(record.read_idx(0))
-    max_idx = int(header.label[0])
-
-    tasks = []
-    print("⏳ Reading records...")
-    for i in tqdm(range(1, max_idx + 1)):
-        try:
-            item = record.read_idx(i)
-            if item is None: continue
-            header, img_bytes = recordio.unpack(item)
-            label = int(header.label) if isinstance(header.label, (int, float)) else int(header.label[0])
-            tasks.append((label, img_bytes, i, RAW_IMAGES_DIR))
-        except:
-            pass
-
+    print(f"📦 Extracting archives to {RAW_IMAGES_DIR}...")
     RAW_IMAGES_DIR.mkdir(parents=True, exist_ok=True)
-    
-    print(f"💾 Saving {len(tasks)} images using {NUM_WORKERS} workers...")
-    with ThreadPoolExecutor(max_workers=NUM_WORKERS) as executor:
-        list(tqdm(executor.map(save_raw_image, tasks), total=len(tasks)))
-    print("✅ Extraction completed.")
 
-def find_rec_file(start_dir):
-    rec_files = list(start_dir.rglob("*.rec"))
-    for f in rec_files:
-        if "train" in f.name: return f
-    return rec_files[0] if rec_files else None
+    for tar_path in DOWNLOAD_DIR.glob("*.tgz"):
+        print(f"   - Extracting {tar_path.name}...")
+        with tarfile.open(tar_path) as tar:
+            tar.extractall(path=DOWNLOAD_DIR)
+
+    source_root = None
+    for path in DOWNLOAD_DIR.rglob("lfw-funneled"):
+        if path.is_dir():
+            source_root = path
+            break
+    
+    if not source_root:
+        possible = list(DOWNLOAD_DIR.rglob("George_W_Bush"))
+        if possible: source_root = possible[0].parent
+
+    if not source_root:
+        print("❌ Could not find image root directory.")
+        return
+
+    print(f"📂 Organizing raw images into {RAW_IMAGES_DIR}...")
+    shutil.copytree(source_root, RAW_IMAGES_DIR, dirs_exist_ok=True)
+    print("✅ Raw extraction completed.")
 
 
 # --- PHASE 2: CROP ONLY (BATCHED) ---
 
 def process_crop_only_batched():
-    print(f"✂️  Phase 2: Running FAST MTCNN CROP ONLY (Batch Size: {BATCH_SIZE})...")
-    
-    if not RAW_IMAGES_DIR.exists():
-        print("❌ Raw images directory not found. Run extraction first.")
-        return
-
+    print(f"✂️  Running FAST CROP ONLY (LFW) -> {PROCESSED_DIR}...")
     PROCESSED_DIR.mkdir(parents=True, exist_ok=True)
-    
+
+    # Copy pairs.txt
+    pairs_src = list(DOWNLOAD_DIR.rglob("pairs.txt"))
+    if pairs_src:
+        shutil.copy(pairs_src[0], PROCESSED_DIR / "pairs.txt")
+        print("📄 Copied pairs.txt successfully.")
+    else:
+        print("⚠️ pairs.txt not found! Validation will fail.")
+
+    # Init MTCNN (PyTorch)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"   -> Using device: {device}")
+    print(f"   -> Using device: {device} | Batch Size: {BATCH_SIZE}")
     
-    # Init facenet-pytorch MTCNN
-    # landmarks=False bo robimy tylko crop ramki
+    # landmarks=False -> tylko crop
     detector = MTCNN(keep_all=False, select_largest=False, device=device, post_process=False)
     
-    print("🔍 Scanning files...")
     image_paths = list(RAW_IMAGES_DIR.rglob("*.jpg"))
-    print(f"   -> Found {len(image_paths)} images to process.")
-    
+    print(f"🔍 Found {len(image_paths)} images to process.")
+
     # Loader
     dataset = FaceDataset(image_paths)
     loader = DataLoader(
@@ -173,19 +147,17 @@ def process_crop_only_batched():
 
     success_count = 0
     
-    for images, paths in tqdm(loader, desc="Cropping (Batched)"):
+    for images, paths in tqdm(loader, desc="Cropping LFW (Batched)"):
         if not images: continue
         
         try:
             # 1. Detect faces (boxes only)
-            # boxes_list: [[box1], [box2], ...]
-            # probs_list: [[prob1], ...]
             boxes_list, probs_list = detector.detect(images, landmarks=False)
         except Exception as e:
             print(f"⚠️ Batch error: {e}")
             continue
             
-        # 2. Process results (CPU)
+        # 2. Process results
         for i, path_str in enumerate(paths):
             img_path = Path(path_str)
             save_dir = PROCESSED_DIR / img_path.parent.name
@@ -199,20 +171,18 @@ def process_crop_only_batched():
             final_img = None
             
             if boxes_list[i] is not None:
-                # 1. Take best face
-                box = boxes_list[i][0] # Pierwszy box (najlepszy)
-                
-                # 2. Get coordinates
+                # Najlepsza twarz
+                box = boxes_list[i][0]
                 x1, y1, x2, y2 = [int(b) for b in box]
                 
-                # 3. Clamp
+                # Clamp
                 h_img, w_img = img_bgr.shape[:2]
                 x1 = max(0, x1)
                 y1 = max(0, y1)
                 x2 = min(w_img, x2)
                 y2 = min(h_img, y2)
                 
-                # 4. Crop
+                # Crop
                 if x2 > x1 and y2 > y1:
                     crop_img = img_bgr[y1:y2, x1:x2]
                     final_img = cv2.resize(crop_img, (112, 112))
@@ -225,19 +195,13 @@ def process_crop_only_batched():
             cv2.imwrite(str(save_path), final_img)
             success_count += 1
 
-    print(f"✅ Cropping completed. Processed: {success_count}/{len(image_paths)}")
-    print(f"💾 Data ready at: {PROCESSED_DIR}")
+    print(f"✅ Done. Processed: {success_count}/{len(image_paths)}")
+    print(f"💾 Ready for validation in: {PROCESSED_DIR}")
 
 
 def main():
     download_dataset()
-    
-    rec_file = find_rec_file(RAW_REC_DIR)
-    if not rec_file:
-        print("❌ .rec file not found.")
-        return
-
-    extract_raw_images(rec_file)
+    extract_raw_images()
     process_crop_only_batched()
 
 if __name__ == "__main__":
